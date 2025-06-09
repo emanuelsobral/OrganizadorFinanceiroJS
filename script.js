@@ -84,26 +84,27 @@ function setupRealtimeListeners() {
     if (!userId) return;
     const getPath = (coll) => `users/${userId}/${coll}`;
     
-    const unsubTransactions = onSnapshot(query(collection(db, getPath('transactions'))), (snapshot) => {
-        transactions = snapshot.docs.map(d => ({id:d.id, ...d.data()}));
-        checkAndSyncRecurringExpenses();
-    });
-    const unsubRecurring = onSnapshot(query(collection(db, getPath('recurringExpenses'))), (snapshot) => {
-        recurringExpenses = snapshot.docs.map(d => ({id:d.id, ...d.data()}));
-        checkAndSyncRecurringExpenses();
-    });
-    const unsubAccounts = onSnapshot(query(collection(db, getPath('accounts'))), (snapshot) => {
-        accounts = snapshot.docs.map(d => ({id:d.id, ...d.data()}));
-        updateUI();
-    });
+    const unsubTransactions = onSnapshot(query(collection(db, getPath('transactions'))), () => { checkAndSyncData(); });
+    const unsubRecurring = onSnapshot(query(collection(db, getPath('recurringExpenses'))), () => { checkAndSyncData(); });
+    const unsubAccounts = onSnapshot(query(collection(db, getPath('accounts'))), () => { checkAndSyncData(); });
 
     unsubscribeListeners.push(unsubTransactions, unsubRecurring, unsubAccounts);
 }
 
-async function checkAndSyncRecurringExpenses() {
-    if (!userId) { updateUI(); return; }
-    
+async function checkAndSyncData() {
+    if (!userId) return;
     const getPath = (coll) => `users/${userId}/${coll}`;
+
+    const [transactionsSnap, recurringSnap, accountsSnap] = await Promise.all([
+        getDocs(query(collection(db, getPath('transactions')))),
+        getDocs(query(collection(db, getPath('recurringExpenses')))),
+        getDocs(query(collection(db, getPath('accounts'))))
+    ]);
+
+    transactions = transactionsSnap.docs.map(d => ({id: d.id, ...d.data()}));
+    recurringExpenses = recurringSnap.docs.map(d => ({id: d.id, ...d.data()}));
+    accounts = accountsSnap.docs.map(d => ({id: d.id, ...d.data()}));
+    
     const batch = writeBatch(db);
     const today = new Date(); today.setHours(0,0,0,0);
     const existingRecTransactions = new Set(transactions.filter(t => t.recurringExpenseId).map(t => `${t.recurringExpenseId}_${t.date}`));
@@ -155,7 +156,7 @@ function updateAllCharts() {
     updateDashboardCards();
     updateExpensesByCategoryChart();
     updateMonthlyFlowChart();
-    updateFutureBalanceChart();
+    updateAnnualProjectionChart();
     updateInvestmentGrowthChart();
     updateCashFlowProjectionChart();
     updateBudgetBurnDownChart();
@@ -375,35 +376,66 @@ function updateMonthlyFlowChart() {
         options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } }
     });
 }
-function updateFutureBalanceChart() {
+function updateAnnualProjectionChart() {
     if (!isUIReady) return;
-    const ctx = document.getElementById('futureBalanceChart')?.getContext('2d');
+    const ctx = document.getElementById('annualProjectionChart')?.getContext('2d');
     if (!ctx) return;
-    
-    const labels = [];
-    const balanceData = [];
-    
+
+    const now = new Date();
+    const currentYear = now.getUTCFullYear();
+    const currentMonth = now.getUTCMonth();
+
+    const startOfYear = new Date(Date.UTC(currentYear, 0, 1));
+    const priorTransactions = transactions.filter(t => new Date(t.date + 'T00:00:00Z') < startOfYear);
+    let yearStartBalance = priorTransactions.reduce((bal, t) => {
+        if (t.paidWithVR || t.category === 'Crédito VR') return bal;
+        return bal + (t.type === 'income' ? t.amount : -t.amount);
+    }, 0);
+
     const last3Months = new Date();
     last3Months.setUTCMonth(last3Months.getUTCMonth() - 3);
     const recentTransactions = transactions.filter(t => new Date(t.date + 'T00:00:00Z') >= last3Months);
     const avgNetFlow = (recentTransactions.filter(t => t.type === 'income' && t.category !== 'Crédito VR').reduce((s, t) => s + t.amount, 0) - recentTransactions.filter(t => t.type === 'expense' && !t.paidWithVR).reduce((s, t) => s + t.amount, 0)) / 3;
 
-    let currentBalance = transactions.reduce((bal, t) => {
-        if (t.category === 'Crédito VR' || t.paidWithVR) return bal;
-        return bal + (t.type === 'income' ? t.amount : -t.amount)
-    }, 0);
+    const labels = Array.from({ length: 12 }, (_, i) => {
+        const d = new Date(Date.UTC(currentYear, i, 1));
+        return d.toLocaleString('pt-BR', { month: 'short', timeZone: 'UTC' });
+    });
+    
+    const balanceData = [];
+    let lastActualBalance = yearStartBalance;
 
     for (let i = 0; i < 12; i++) {
-        const futureDate = new Date();
-        futureDate.setUTCMonth(futureDate.getUTCMonth() + i);
-        labels.push(futureDate.toLocaleString('pt-BR', { month: 'short', timeZone: 'UTC' }));
-        balanceData.push((currentBalance + (avgNetFlow * i)).toFixed(2));
+        if (i <= currentMonth) {
+            const monthTransactions = transactions.filter(t => {
+                const tDate = new Date(t.date + 'T00:00:00Z');
+                return tDate.getUTCFullYear() === currentYear && tDate.getUTCMonth() === i;
+            });
+            const monthNetFlow = monthTransactions.reduce((bal, t) => {
+                if (t.paidWithVR || t.category === 'Crédito VR') return bal;
+                return bal + (t.type === 'income' ? t.amount : -t.amount);
+            }, 0);
+            lastActualBalance += monthNetFlow;
+            balanceData.push(lastActualBalance);
+        } else {
+            const projectedBalance = balanceData[balanceData.length - 1] + avgNetFlow;
+            balanceData.push(projectedBalance);
+        }
     }
+    
+    const actualData = balanceData.slice(0, currentMonth + 1);
+    const projectedData = Array(currentMonth).fill(null).concat(balanceData.slice(currentMonth));
 
-    chartInstances.futureBalance = new Chart(ctx, {
+    chartInstances.annualProjection = new Chart(ctx, {
         type: 'line',
-        data: { labels, datasets: [{ label: 'Saldo Projetado', data: balanceData, borderColor: '#4f46e5', backgroundColor: 'rgba(79, 70, 229, 0.1)', fill: true, tension: 0.3 }] },
-        options: { responsive: true, maintainAspectRatio: false }
+        data: {
+            labels,
+            datasets: [
+                { label: 'Saldo Real', data: actualData, borderColor: '#4f46e5', backgroundColor: 'rgba(79, 70, 229, 0.1)', fill: false, tension: 0.1 },
+                { label: 'Saldo Projetado', data: projectedData, borderColor: '#4f46e5', borderDash: [5, 5], backgroundColor: 'rgba(79, 70, 229, 0.1)', fill: false, tension: 0.1 }
+            ]
+        },
+        options: { responsive: true, maintainAspectRatio: false, }
     });
 }
 function updateInvestmentGrowthChart() {
@@ -481,7 +513,6 @@ function updateCashFlowProjectionChart() {
         options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: false }, y: { stacked: false } } }
     });
 }
-
 function updateBudgetBurnDownChart() {
     if (!isUIReady) return;
     const ctx = document.getElementById('budgetBurnDownChart')?.getContext('2d');
@@ -502,32 +533,52 @@ function updateBudgetBurnDownChart() {
     const expensesInMonth = transactions.filter(t => {
         const tDate = new Date(t.date + 'T00:00:00Z');
         return t.type === 'expense' && t.category === category && tDate.getUTCMonth() === currentMonth && tDate.getUTCFullYear() === currentYear;
-    }).sort((a,b) => new Date(a.date) - new Date(b.date));
-
-    const labels = ['Início do Mês'];
-    const data = [budgetAmount];
-    let remainingBudget = budgetAmount;
-
-    expensesInMonth.forEach(expense => {
-        labels.push(new Date(expense.date + 'T00:00:00Z').toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit'}));
-        remainingBudget -= expense.amount;
-        data.push(remainingBudget.toFixed(2));
     });
+    
+    const totalSpent = expensesInMonth.reduce((sum, expense) => sum + expense.amount, 0);
 
     chartInstances.budgetBurnDown = new Chart(ctx, {
-        type: 'line',
+        type: 'bar',
         data: {
-            labels: labels,
-            datasets: [{
-                label: `Orçamento Restante - ${category}`,
-                data: data,
-                borderColor: '#ef4444',
-                backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                fill: true,
-                stepped: true,
-            }]
+            labels: [category],
+            datasets: [
+                {
+                    label: 'Gasto',
+                    data: [totalSpent],
+                    backgroundColor: totalSpent > budgetAmount ? '#ef4444' : '#3b82f6',
+                    borderColor: totalSpent > budgetAmount ? '#b91c1c' : '#2563eb',
+                    borderWidth: 1,
+                    barPercentage: 0.5
+                },
+                {
+                    label: 'Orçamento',
+                    data: [budgetAmount],
+                    backgroundColor: 'rgba(209, 213, 219, 0.5)',
+                    borderColor: 'rgba(156, 163, 175, 1)',
+                    borderWidth: 1,
+                    barPercentage: 0.5
+                }
+            ]
         },
-        options: { responsive: true, maintainAspectRatio: false }
+        options: { 
+            indexAxis: 'y',
+            responsive: true, 
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    stacked: false,
+                    beginAtZero: true,
+                },
+                y: {
+                    stacked: false,
+                }
+            },
+            plugins: {
+                legend: {
+                    display: false
+                }
+            }
+        }
     });
 }
 
@@ -548,17 +599,14 @@ async function deleteAccount(id) {
         const getPath = (coll) => `users/${userId}/${coll}`;
         const batch = writeBatch(db);
 
-        // 1. Delete the account document
         batch.delete(doc(db, getPath('accounts'), id));
 
-        // 2. Find and delete all associated transactions
         const q = query(collection(db, getPath('transactions')), where("accountId", "==", id));
         const querySnapshot = await getDocs(q);
         querySnapshot.forEach((doc) => {
             batch.delete(doc.ref);
         });
 
-        // 3. (Optional) Transfer remaining balance
         if (account.currentValue > 0) {
             batch.set(doc(collection(db, getPath('transactions'))), {
                 description: `Saldo final da conta excluída: ${account.name}`,
@@ -798,4 +846,4 @@ function setupEventListeners() {
 }
 
 // --- Iniciar a Aplicação ---
-initializeFinanceApp();
+document.addEventListener('DOMContentLoaded', initializeFinanceApp);
