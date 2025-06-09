@@ -1,0 +1,26 @@
+# Ficheiros de configuração local e variáveis de ambiente
+.env
+*.env
+.env.*
+
+# Dependências do Node.js
+node_modules/
+
+# Ficheiros de log
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Ficheiros de sistema (macOS, Windows, Linux)
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Ficheiros de configuração de IDEs
+.idea/
+.vscode/
+*.swp
+
+# IGNORAR O FICHEIRO DE CONFIGURAÇÃO DO FIREBASE
+firebase-config.js
