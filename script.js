@@ -1,7 +1,7 @@
 // --- Imports ---
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.9.0/firebase-app.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/11.9.0/firebase-auth.js";
-import { getFirestore, collection, addDoc, onSnapshot, query, doc, deleteDoc, writeBatch, updateDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.9.0/firebase-firestore.js";
+import { getFirestore, collection, addDoc, onSnapshot, query, doc, deleteDoc, writeBatch, updateDoc, getDocs, where } from "https://www.gstatic.com/firebasejs/11.9.0/firebase-firestore.js";
 import { firebaseConfig } from './firebase-config.js';
 
 let app, auth, db, userId;
@@ -84,28 +84,17 @@ function setupRealtimeListeners() {
     if (!userId) return;
     const getPath = (coll) => `users/${userId}/${coll}`;
     
-    let initialDataLoaded = { transactions: false, recurring: false, accounts: false };
-
-    const checkAllDataLoaded = () => {
-        if (Object.values(initialDataLoaded).every(Boolean)) {
-            checkAndSyncRecurringExpenses();
-        }
-    }
-
     const unsubTransactions = onSnapshot(query(collection(db, getPath('transactions'))), (snapshot) => {
         transactions = snapshot.docs.map(d => ({id:d.id, ...d.data()}));
-        initialDataLoaded.transactions = true;
-        checkAllDataLoaded();
+        checkAndSyncRecurringExpenses();
     });
     const unsubRecurring = onSnapshot(query(collection(db, getPath('recurringExpenses'))), (snapshot) => {
         recurringExpenses = snapshot.docs.map(d => ({id:d.id, ...d.data()}));
-        initialDataLoaded.recurring = true;
-        checkAllDataLoaded();
+        checkAndSyncRecurringExpenses();
     });
     const unsubAccounts = onSnapshot(query(collection(db, getPath('accounts'))), (snapshot) => {
         accounts = snapshot.docs.map(d => ({id:d.id, ...d.data()}));
-        initialDataLoaded.accounts = true;
-        checkAllDataLoaded();
+        updateUI();
     });
 
     unsubscribeListeners.push(unsubTransactions, unsubRecurring, unsubAccounts);
@@ -156,6 +145,7 @@ function updateUI() {
     renderAccountsList();
     renderRecurringExpensesListModal();
     renderAccountDropdowns();
+    renderBudgetCategorySelect();
     updateAllCharts();
 }
 
@@ -168,6 +158,7 @@ function updateAllCharts() {
     updateFutureBalanceChart();
     updateInvestmentGrowthChart();
     updateCashFlowProjectionChart();
+    updateBudgetBurnDownChart();
 }
 
 function renderTransactionList() {
@@ -217,17 +208,57 @@ function renderAccountsList() {
         listElement.innerHTML = `<p class="text-center text-gray-500 py-4">Nenhuma conta encontrada.</p>`;
         return;
     }
-    listElement.innerHTML = accounts.map(acc => `
-        <div class="p-4 border rounded-lg flex flex-wrap items-center justify-between gap-4">
-            <div><p class="font-semibold text-gray-800">${acc.name}</p><p class="text-2xl font-bold text-teal-700">${formatCurrency(acc.currentValue)}</p></div>
-            <div class="flex flex-wrap gap-2">
-                <button data-id="${acc.id}" data-action="deposit" class="account-action-btn bg-green-100 text-green-800 text-xs font-bold py-1 px-3 rounded-full hover:bg-green-200">Aportar</button>
-                <button data-id="${acc.id}" data-action="withdraw" class="account-action-btn bg-blue-100 text-blue-800 text-xs font-bold py-1 px-3 rounded-full hover:bg-blue-200">Resgatar</button>
-                <button data-id="${acc.id}" data-action="update" class="account-action-btn bg-yellow-100 text-yellow-800 text-xs font-bold py-1 px-3 rounded-full hover:bg-yellow-200">Atualizar</button>
-                <button data-id="${acc.id}" class="delete-account-btn bg-red-100 text-red-800 text-xs font-bold py-1 px-3 rounded-full hover:bg-red-200">Excluir</button>
+    listElement.innerHTML = accounts.map(acc => {
+        const hasGoal = acc.goalAmount && acc.goalAmount > 0;
+        let progressHtml = '';
+        if (hasGoal) {
+            const percentage = Math.min((acc.currentValue / acc.goalAmount) * 100, 100);
+            const monthlyContributions = transactions
+                .filter(t => t.type === 'expense' && t.category === 'Investimento (Aporte)' && t.accountId === acc.id)
+                .reduce((acc, t) => {
+                    const month = new Date(t.date).toLocaleDateString('pt-BR', {month:'2-digit', year:'numeric'});
+                    acc[month] = (acc[month] || 0) + t.amount;
+                    return acc;
+                }, {});
+            
+            const avgContribution = Object.values(monthlyContributions).reduce((a,b) => a+b, 0) / (Object.keys(monthlyContributions).length || 1);
+            const remainingAmount = acc.goalAmount - acc.currentValue;
+            let projectionText = '';
+            if (avgContribution > 0 && remainingAmount > 0) {
+                const monthsRemaining = Math.ceil(remainingAmount / avgContribution);
+                const completionDate = new Date();
+                completionDate.setMonth(completionDate.getMonth() + monthsRemaining);
+                projectionText = ` <span class="text-xs text-gray-500"> - Meta: ${completionDate.toLocaleDateString('pt-BR', {month: 'long', year: 'numeric'})}</span>`;
+            }
+
+            progressHtml = `
+                <div class="mt-2">
+                    <div class="flex justify-between text-xs font-medium text-gray-600">
+                        <span>Progresso</span>
+                        <span>${formatCurrency(acc.currentValue)} / ${formatCurrency(acc.goalAmount)}</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-2.5 mt-1">
+                        <div class="bg-teal-600 h-2.5 rounded-full" style="width: ${percentage}%"></div>
+                    </div>
+                    <p class="text-right">${projectionText}</p>
+                </div>
+            `;
+        }
+
+        return `
+        <div class="p-4 border rounded-lg">
+            <div class="flex flex-wrap items-center justify-between gap-4">
+                <div><p class="font-semibold text-gray-800">${acc.name}</p><p class="text-2xl font-bold text-teal-700">${formatCurrency(acc.currentValue)}</p></div>
+                <div class="flex flex-wrap gap-2">
+                    <button data-id="${acc.id}" data-action="deposit" class="account-action-btn bg-green-100 text-green-800 text-xs font-bold py-1 px-3 rounded-full hover:bg-green-200">Aportar</button>
+                    <button data-id="${acc.id}" data-action="withdraw" class="account-action-btn bg-blue-100 text-blue-800 text-xs font-bold py-1 px-3 rounded-full hover:bg-blue-200">Resgatar</button>
+                    <button data-id="${acc.id}" data-action="update" class="account-action-btn bg-yellow-100 text-yellow-800 text-xs font-bold py-1 px-3 rounded-full hover:bg-yellow-200">Atualizar</button>
+                    <button data-id="${acc.id}" class="delete-account-btn bg-red-100 text-red-800 text-xs font-bold py-1 px-3 rounded-full hover:bg-red-200">Excluir</button>
+                </div>
             </div>
+            ${progressHtml}
         </div>
-    `).join('');
+    `}).join('');
     
     document.querySelectorAll('.account-action-btn').forEach(btn => btn.onclick = (e) => setupAccountActionModal(e.target.dataset.id, e.target.dataset.action));
     document.querySelectorAll('.delete-account-btn').forEach(btn => btn.onclick = (e) => deleteAccount(e.target.dataset.id));
@@ -241,6 +272,13 @@ function renderAccountDropdowns() {
             if (accounts.length === 0) select.innerHTML = `<option value="" disabled>Crie uma conta primeiro</option>`;
         }
     });
+}
+
+function renderBudgetCategorySelect() {
+    const select = document.getElementById('budget-category-select');
+    if (!select) return;
+    const expenseCategories = Object.keys(transactions.filter(t => t.type === 'expense').reduce((acc, t) => { acc[t.category] = true; return acc; }, {}));
+    select.innerHTML = `<option value="">Selecione uma categoria</option>` + expenseCategories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
 }
 
 function updateCategoryDropdown() {
@@ -272,11 +310,11 @@ function updateDashboardCards() {
     const now = new Date();
     const currentMonth = now.getUTCMonth();
     const currentYear = now.getUTCFullYear();
-    const getMonthlyTotal = (type, excludeVR) => transactions.filter(t => {
+    const getMonthlyTotal = (type, excludeInternal) => transactions.filter(t => {
         const transactionDate = new Date(t.date);
         let condition = transactionDate.getUTCMonth() === currentMonth && transactionDate.getUTCFullYear() === currentYear && t.type === type;
-        if (excludeVR) {
-            condition = condition && t.category !== 'Crédito VR' && !t.paidWithVR;
+        if (excludeInternal) {
+            condition = condition && t.category !== 'Crédito VR' && !t.paidWithVR && t.category !== 'Investimento (Aporte)' && t.category !== 'Resgate Guardado';
         }
         return condition;
     }).reduce((s, t) => s + t.amount, 0);
@@ -444,6 +482,56 @@ function updateCashFlowProjectionChart() {
     });
 }
 
+function updateBudgetBurnDownChart() {
+    if (!isUIReady) return;
+    const ctx = document.getElementById('budgetBurnDownChart')?.getContext('2d');
+    if (!ctx) return;
+
+    const category = document.getElementById('budget-category-select').value;
+    const budgetAmount = parseFloat(document.getElementById('budget-amount-input').value) || 0;
+
+    if (!category || budgetAmount <= 0) {
+        if(chartInstances.budgetBurnDown) chartInstances.budgetBurnDown.destroy();
+        return;
+    }
+
+    const now = new Date();
+    const currentMonth = now.getUTCMonth();
+    const currentYear = now.getUTCFullYear();
+    
+    const expensesInMonth = transactions.filter(t => {
+        const tDate = new Date(t.date + 'T00:00:00Z');
+        return t.type === 'expense' && t.category === category && tDate.getUTCMonth() === currentMonth && tDate.getUTCFullYear() === currentYear;
+    }).sort((a,b) => new Date(a.date) - new Date(b.date));
+
+    const labels = ['Início do Mês'];
+    const data = [budgetAmount];
+    let remainingBudget = budgetAmount;
+
+    expensesInMonth.forEach(expense => {
+        labels.push(new Date(expense.date + 'T00:00:00Z').toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit'}));
+        remainingBudget -= expense.amount;
+        data.push(remainingBudget.toFixed(2));
+    });
+
+    chartInstances.budgetBurnDown = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: `Orçamento Restante - ${category}`,
+                data: data,
+                borderColor: '#ef4444',
+                backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                fill: true,
+                stepped: true,
+            }]
+        },
+        options: { responsive: true, maintainAspectRatio: false }
+    });
+}
+
+
 // --- Funções de Lógica de Negócio (CRUD) ---
 async function deleteTransaction(id) { 
     showConfirmation('Tem certeza que deseja excluir esta transação?', async () => {
@@ -453,17 +541,35 @@ async function deleteTransaction(id) {
 async function deleteAccount(id) {
     const account = accounts.find(a => a.id === id);
     if (!account) return;
-    showConfirmation(`Tem certeza que quer deletar a conta "${account.name}"?`, () => {
-         showConfirmation(`Deseja transferir o saldo de ${formatCurrency(account.currentValue)} para suas receitas?`, async () => {
-            const batch = writeBatch(db);
-            batch.delete(doc(db, `users/${userId}/accounts/${id}`));
-            if(account.currentValue > 0) {
-                batch.set(doc(collection(db, `users/${userId}/transactions`)), {
-                    description: `Saldo de conta excluída - ${account.name}`, amount: account.currentValue, type: 'income', category: 'Outros', date: new Date().toISOString().split('T')[0]
-                });
-            }
-            await batch.commit();
-         });
+
+    const message = `Tem certeza que quer deletar a conta "${account.name}"? Todas as transações associadas serão removidas permanentemente.`;
+    
+    showConfirmation(message, async () => {
+        const getPath = (coll) => `users/${userId}/${coll}`;
+        const batch = writeBatch(db);
+
+        // 1. Delete the account document
+        batch.delete(doc(db, getPath('accounts'), id));
+
+        // 2. Find and delete all associated transactions
+        const q = query(collection(db, getPath('transactions')), where("accountId", "==", id));
+        const querySnapshot = await getDocs(q);
+        querySnapshot.forEach((doc) => {
+            batch.delete(doc.ref);
+        });
+
+        // 3. (Optional) Transfer remaining balance
+        if (account.currentValue > 0) {
+            batch.set(doc(collection(db, getPath('transactions'))), {
+                description: `Saldo final da conta excluída: ${account.name}`,
+                amount: account.currentValue,
+                type: 'income',
+                category: 'Outros',
+                date: new Date().toISOString().split('T')[0]
+            });
+        }
+        
+        await batch.commit().catch(e => console.error("Error deleting account:", e));
     });
 }
 async function deleteRecurringExpense(id) {
@@ -550,26 +656,19 @@ function setupEventListeners() {
 
     // Modal Buttons
     document.querySelectorAll('.close-modal-btn').forEach(btn => btn.onclick = closeModal);
-    document.getElementById('addTransactionBtn').onclick = () => { 
-        document.getElementById('transaction-form').reset(); 
-        document.getElementById('date').valueAsDate = new Date(); 
-        document.getElementById('pay-with-vr').checked = localStorage.getItem('financeApp-payWithVR') === 'true';
-        updateCategoryDropdown(); 
-        openModal('transaction-modal'); 
-    };
+    document.getElementById('addTransactionBtn').onclick = () => { document.getElementById('transaction-form').reset(); document.getElementById('date').valueAsDate = new Date(); updateCategoryDropdown(); openModal('transaction-modal'); };
     document.getElementById('manageRecurringExpensesBtn').onclick = () => openModal('manage-recurring-expenses-modal');
     document.getElementById('manageAccountsBtn').onclick = () => {
         document.getElementById('add-account-form').reset();
-        document.getElementById('deduct-from-balance').checked = localStorage.getItem('financeApp-deductFromBalance') !== 'false'; // Default to true
+        document.getElementById('deduct-from-balance').checked = true; // Reset checkbox
         openModal('manage-accounts-modal');
     };
     document.getElementById('addNewRecurringExpenseBtn').onclick = () => { 
-        const form = document.getElementById('recurring-expense-form');
-        form.reset(); 
-        document.getElementById('recurring-start-date').valueAsDate = new Date(); 
-        const isInstallmentCheckbox = document.getElementById('is-installment-checkbox');
-        isInstallmentCheckbox.checked = localStorage.getItem('financeApp-isInstallment') === 'true';
-        isInstallmentCheckbox.dispatchEvent(new Event('change')); // Trigger change to show/hide sections
+        document.getElementById('recurring-expense-form').reset(); 
+        document.getElementById('recurring-start-date').valueAsDate = new Date();
+        const checkbox = document.getElementById('is-installment-checkbox');
+        checkbox.checked = false;
+        checkbox.dispatchEvent(new Event('change')); // Ensure sections are correctly shown/hidden
         openModal('recurring-expense-form-modal'); 
     };
     
@@ -578,21 +677,12 @@ function setupEventListeners() {
     document.getElementById('category').onchange = togglePaymentOptions;
     document.getElementById('investment-account-select').onchange = updateInvestmentGrowthChart;
     document.getElementById('investment-rate').oninput = updateInvestmentGrowthChart;
-    
-    const isInstallmentCheckbox = document.getElementById('is-installment-checkbox');
-    isInstallmentCheckbox.onchange = (e) => {
+    document.getElementById('budget-category-select').onchange = updateBudgetBurnDownChart;
+    document.getElementById('budget-amount-input').oninput = updateBudgetBurnDownChart;
+    document.getElementById('is-installment-checkbox').onchange = (e) => {
         document.getElementById('recurring-frequency-section').classList.toggle('hidden', e.target.checked);
         document.getElementById('installments-count-section').classList.toggle('hidden', !e.target.checked);
-        localStorage.setItem('financeApp-isInstallment', e.target.checked);
     };
-
-    document.getElementById('pay-with-vr').onchange = (e) => {
-        localStorage.setItem('financeApp-payWithVR', e.target.checked);
-    };
-    document.getElementById('deduct-from-balance').onchange = (e) => {
-        localStorage.setItem('financeApp-deductFromBalance', e.target.checked);
-    };
-
 
     // Form Submissions
     document.getElementById('transaction-form').onsubmit = async (e) => {
@@ -616,21 +706,25 @@ function setupEventListeners() {
     };
     document.getElementById('add-account-form').onsubmit = async (e) => { 
         e.preventDefault();
-        const name = e.target['account-name'].value;
-        const initialValue = parseFloat(e.target['account-initial-value'].value);
+        const newAccount = {
+            name: e.target['account-name'].value,
+            currentValue: parseFloat(e.target['account-initial-value'].value) || 0,
+            goalAmount: parseFloat(e.target['account-goal'].value) || 0,
+            createdAt: new Date(),
+        };
         const deduct = e.target['deduct-from-balance'].checked;
         const batch = writeBatch(db);
-        batch.set(doc(collection(db, `users/${userId}/accounts`)), { name, currentValue: initialValue, createdAt: new Date() });
-        if (initialValue > 0 && deduct) {
+        const newAccRef = doc(collection(db, `users/${userId}/accounts`));
+        batch.set(newAccRef, newAccount);
+        
+        if (newAccount.currentValue > 0 && deduct) {
             batch.set(doc(collection(db, `users/${userId}/transactions`)), {
-                description: `Aporte inicial - ${name}`, amount: initialValue, type: 'expense', category: 'Investimento (Aporte)', date: new Date().toISOString().split('T')[0]
+                description: `Aporte inicial - ${newAccount.name}`, amount: newAccount.currentValue, type: 'expense', category: 'Investimento (Aporte)', date: new Date().toISOString().split('T')[0],
+                accountId: newAccRef.id
             });
         }
         await batch.commit();
         e.target.reset();
-        // Reset checkbox to its default after submission
-        document.getElementById('deduct-from-balance').checked = true;
-        localStorage.setItem('financeApp-deductFromBalance', 'true');
     };
     document.getElementById('account-action-form').onsubmit = async (e) => {
         e.preventDefault();
@@ -646,13 +740,13 @@ function setupEventListeners() {
         
         if (action === 'update') {
             const diff = amount - account.currentValue;
-            if (diff !== 0) batch.set(doc(transColl), { description: `${diff > 0 ? 'Rendimento' : 'Ajuste'} - ${account.name}`, amount: Math.abs(diff), type: diff > 0 ? 'income' : 'expense', category: diff > 0 ? 'Rendimentos' : 'Outros', date: new Date().toISOString().split('T')[0] });
+            if (diff !== 0) batch.set(doc(transColl), { description: `${diff > 0 ? 'Rendimento' : 'Ajuste'} - ${account.name}`, amount: Math.abs(diff), type: diff > 0 ? 'income' : 'expense', category: 'Rendimentos', date: new Date().toISOString().split('T')[0], accountId: id });
             batch.update(accRef, { currentValue: amount });
         } else if (action === 'withdraw') {
-            batch.set(doc(transColl), { description: `Resgate - ${account.name}`, amount, type: 'income', category: 'Resgate Guardado', date: new Date().toISOString().split('T')[0] });
+            batch.set(doc(transColl), { description: `Resgate - ${account.name}`, amount, type: 'income', category: 'Resgate Guardado', date: new Date().toISOString().split('T')[0], accountId: id });
             batch.update(accRef, { currentValue: account.currentValue - amount });
         } else if (action === 'deposit') {
-            batch.set(doc(transColl), { description: `Aporte - ${account.name}`, amount, type: 'expense', category: 'Investimento (Aporte)', date: new Date().toISOString().split('T')[0] });
+            batch.set(doc(transColl), { description: `Aporte - ${account.name}`, amount, type: 'expense', category: 'Investimento (Aporte)', date: new Date().toISOString().split('T')[0], accountId: id });
             batch.update(accRef, { currentValue: account.currentValue + amount });
         }
         await batch.commit();
