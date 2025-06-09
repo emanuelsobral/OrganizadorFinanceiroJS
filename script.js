@@ -4,8 +4,6 @@ import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, on
 import { getFirestore, collection, addDoc, onSnapshot, query, doc, deleteDoc, writeBatch, updateDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.9.0/firebase-firestore.js";
 import { firebaseConfig } from './firebase-config.js';
 
-// --- Configuração Inicial e Estados ---
-
 let app, auth, db, userId;
 let transactions = [];
 let recurringExpenses = [];
@@ -562,6 +560,10 @@ function setupEventListeners() {
     document.getElementById('category').onchange = togglePaymentOptions;
     document.getElementById('investment-account-select').onchange = updateInvestmentGrowthChart;
     document.getElementById('investment-rate').oninput = updateInvestmentGrowthChart;
+    document.getElementById('is-installment-checkbox').onchange = (e) => {
+        document.getElementById('recurring-frequency-section').classList.toggle('hidden', e.target.checked);
+        document.getElementById('installments-count-section').classList.toggle('hidden', !e.target.checked);
+    };
 
     // Form Submissions
     document.getElementById('transaction-form').onsubmit = async (e) => {
@@ -626,12 +628,45 @@ function setupEventListeners() {
     };
     document.getElementById('recurring-expense-form').onsubmit = async (e) => {
         e.preventDefault();
-        const newExpense = {
-            description: e.target['recurring-description'].value, amount: parseFloat(e.target['recurring-amount'].value),
-            category: e.target['recurring-category'].value, startDate: e.target['recurring-start-date'].value,
-            frequency: e.target['recurring-frequency'].value,
-        };
-        await addDoc(collection(db, `users/${userId}/recurringExpenses`), newExpense);
+        const isInstallment = e.target['is-installment-checkbox'].checked;
+        const description = e.target['recurring-description'].value;
+        const totalAmount = parseFloat(e.target['recurring-amount'].value);
+        const category = e.target['recurring-category'].value;
+        const startDate = e.target['recurring-start-date'].value;
+
+        if (isInstallment) {
+            const installmentCount = parseInt(e.target['installments-count'].value);
+            if (!installmentCount || installmentCount < 2) {
+                alert('O número de parcelas deve ser 2 ou maior.');
+                return;
+            }
+            const installmentValue = totalAmount / installmentCount;
+            const batch = writeBatch(db);
+            const firstDate = new Date(startDate + 'T00:00:00Z');
+            for (let i = 0; i < installmentCount; i++) {
+                const installmentDate = new Date(firstDate);
+                installmentDate.setUTCMonth(firstDate.getUTCMonth() + i);
+                const newTransaction = {
+                    description: `${description} (${i + 1}/${installmentCount})`,
+                    amount: installmentValue,
+                    type: 'expense',
+                    category: category,
+                    date: installmentDate.toISOString().split('T')[0],
+                };
+                batch.set(doc(collection(db, `users/${userId}/transactions`)), newTransaction);
+            }
+            await batch.commit();
+
+        } else {
+            const newExpense = {
+                description,
+                amount: totalAmount,
+                category,
+                startDate,
+                frequency: e.target['recurring-frequency'].value,
+            };
+            await addDoc(collection(db, `users/${userId}/recurringExpenses`), newExpense);
+        }
         closeModal();
     };
 }
