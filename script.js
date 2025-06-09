@@ -550,20 +550,49 @@ function setupEventListeners() {
 
     // Modal Buttons
     document.querySelectorAll('.close-modal-btn').forEach(btn => btn.onclick = closeModal);
-    document.getElementById('addTransactionBtn').onclick = () => { document.getElementById('transaction-form').reset(); document.getElementById('date').valueAsDate = new Date(); updateCategoryDropdown(); openModal('transaction-modal'); };
+    document.getElementById('addTransactionBtn').onclick = () => { 
+        document.getElementById('transaction-form').reset(); 
+        document.getElementById('date').valueAsDate = new Date(); 
+        document.getElementById('pay-with-vr').checked = localStorage.getItem('financeApp-payWithVR') === 'true';
+        updateCategoryDropdown(); 
+        openModal('transaction-modal'); 
+    };
     document.getElementById('manageRecurringExpensesBtn').onclick = () => openModal('manage-recurring-expenses-modal');
-    document.getElementById('manageAccountsBtn').onclick = () => openModal('manage-accounts-modal');
-    document.getElementById('addNewRecurringExpenseBtn').onclick = () => { document.getElementById('recurring-expense-form').reset(); document.getElementById('recurring-start-date').valueAsDate = new Date(); openModal('recurring-expense-form-modal'); };
+    document.getElementById('manageAccountsBtn').onclick = () => {
+        document.getElementById('add-account-form').reset();
+        document.getElementById('deduct-from-balance').checked = localStorage.getItem('financeApp-deductFromBalance') !== 'false'; // Default to true
+        openModal('manage-accounts-modal');
+    };
+    document.getElementById('addNewRecurringExpenseBtn').onclick = () => { 
+        const form = document.getElementById('recurring-expense-form');
+        form.reset(); 
+        document.getElementById('recurring-start-date').valueAsDate = new Date(); 
+        const isInstallmentCheckbox = document.getElementById('is-installment-checkbox');
+        isInstallmentCheckbox.checked = localStorage.getItem('financeApp-isInstallment') === 'true';
+        isInstallmentCheckbox.dispatchEvent(new Event('change')); // Trigger change to show/hide sections
+        openModal('recurring-expense-form-modal'); 
+    };
     
     // Form Controls
     document.getElementById('type').onchange = updateCategoryDropdown;
     document.getElementById('category').onchange = togglePaymentOptions;
     document.getElementById('investment-account-select').onchange = updateInvestmentGrowthChart;
     document.getElementById('investment-rate').oninput = updateInvestmentGrowthChart;
-    document.getElementById('is-installment-checkbox').onchange = (e) => {
+    
+    const isInstallmentCheckbox = document.getElementById('is-installment-checkbox');
+    isInstallmentCheckbox.onchange = (e) => {
         document.getElementById('recurring-frequency-section').classList.toggle('hidden', e.target.checked);
         document.getElementById('installments-count-section').classList.toggle('hidden', !e.target.checked);
+        localStorage.setItem('financeApp-isInstallment', e.target.checked);
     };
+
+    document.getElementById('pay-with-vr').onchange = (e) => {
+        localStorage.setItem('financeApp-payWithVR', e.target.checked);
+    };
+    document.getElementById('deduct-from-balance').onchange = (e) => {
+        localStorage.setItem('financeApp-deductFromBalance', e.target.checked);
+    };
+
 
     // Form Submissions
     document.getElementById('transaction-form').onsubmit = async (e) => {
@@ -599,6 +628,9 @@ function setupEventListeners() {
         }
         await batch.commit();
         e.target.reset();
+        // Reset checkbox to its default after submission
+        document.getElementById('deduct-from-balance').checked = true;
+        localStorage.setItem('financeApp-deductFromBalance', 'true');
     };
     document.getElementById('account-action-form').onsubmit = async (e) => {
         e.preventDefault();
